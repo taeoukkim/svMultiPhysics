@@ -133,7 +133,6 @@ class CappingSurface {
         /// Surface velocity flux through the cap using \a st columns indexed by cap IEN / GlobalNodeID (master / serial).
         double integrate_velocity_flux(const CapGlobalMeshState& st, bool use_Yn_velocity,
             consts::MechanicalConfigurationType cfg);
-
         /// @brief Compute the cap contribution to the linear solver face (fills \ref valM_; safe under \c const *this).
         void compute_valM(consts::MechanicalConfigurationType cfg, const CapGlobalMeshState& st) const;
 
@@ -156,6 +155,8 @@ class CappingSurface {
         static constexpr int cap_nsd_ = 3;  
         /// @brief The number of independent spatial dimensions (2D).
         static constexpr int cap_insd_ = 2; 
+        /// @brief The cap contribution.
+        mutable Array<double> valM_;
 
         /// @brief Update the element position using cap-compact mesh columns (\a gn_to_cap_local maps global node id to column).
         Array<double> update_element_position_global(int e, consts::MechanicalConfigurationType cfg,
@@ -165,9 +166,6 @@ class CappingSurface {
     
         /// @brief Compute the Jacobian and normal vector for a given element and Gauss point.
         std::pair<double, Vector<double>> compute_jacobian_and_normal(const Array<double>& xl, int e, int g) const;
-
-        /// @brief Cap contribution to the linear solver face; \c mutable so it can be refreshed under \c const *this.
-        mutable Array<double> valM_;
     };
 
 /// @brief Object-oriented Coupled boundary condition
