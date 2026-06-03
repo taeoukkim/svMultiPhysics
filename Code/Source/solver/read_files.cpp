@@ -351,9 +351,9 @@ void read_bc(Simulation* simulation, EquationParameters* eq_params, eqType& lEq,
     lBc.RCR.Pd = bc_params->rcr.distal_pressure.value();
     lBc.RCR.Xo = bc_params->rcr.initial_pressure.value();
 
-    if ((com_mod.cplBC.schm != CplBCType::cplBC_NA && !com_mod.cplBC.useSv1D) ||
+    if ((com_mod.cplBC.schm != CplBCType::cplBC_NA && !com_mod.cplBC.useSv1D && !com_mod.cplBC.useSvZeroD) ||
         com_mod.cplBC.xo.size() != 0) {
-      throw std::runtime_error("[read_bc] RCR cannot be used in conjunction with cplBC (except alongside svOneD).");
+      throw std::runtime_error("[read_bc] RCR cannot be used in conjunction with cplBC (except alongside svOneD or svZeroD).");
     }
     com_mod.cplBC.nFa = com_mod.cplBC.nFa + 1;
     lBc.cplBCptr = com_mod.cplBC.nFa - 1;
@@ -536,6 +536,17 @@ void read_bc(Simulation* simulation, EquationParameters* eq_params, eqType& lEq,
   bool ltmp = bc_params->impose_flux.value();
   if (ltmp) {
     lBc.bType = utils::ibset(lBc.bType, enum_int(BoundaryConditionType::bType_flx)); 
+  }
+
+  // For DIR Coupled BCs (svZeroD or svOneD), the downstream solver always returns a
+  // volumetric flow rate Q [m³/s], not a velocity [m/s].  Without bType_flx, bc_ini
+  // sets gx(a) = 1, and set_bc_dir_l applies velocity = Q * nV which has the wrong
+  // dimensions.  With bType_flx, bc_ini normalises gx(a) = 1/area, so the applied
+  // velocity = (Q/area) * nV [m/s] is physically correct.  Enforce this automatically
+  // regardless of the user's <impose_flux> setting.
+  if (utils::btest(lBc.bType, enum_int(BoundaryConditionType::bType_Coupled)) &&
+      coupled_bc_type == BoundaryConditionType::bType_Dir) {
+    lBc.bType = utils::ibset(lBc.bType, enum_int(BoundaryConditionType::bType_flx));
   }
 
   // To zero-out perimeter or not. Default is .true. for Dir/CMM
@@ -1635,9 +1646,9 @@ void read_eq(Simulation* simulation, EquationParameters* eq_params, eqType& lEq)
     if (std::set<EquationType>{Equation_fluid,Equation_FSI,Equation_CMM}.count(lEq.phys) == 0) {
       throw std::runtime_error("RCR-type BC is allowed for fluid/CMM/FSI eq. only.");
     }
-    // Only set coupling scheme if not already configured by an external solver (e.g. svOneD).
-    // When svOneD and RCR coexist, svOneD owns the scheme; RCR uses the same scheme.
-    if (!cplBC.useSv1D) {
+    // Only set coupling scheme if not already configured by an external solver (e.g. svOneD, svZeroD).
+    // When svOneD/svZeroD and RCR coexist, the external solver owns the scheme; RCR uses the same scheme.
+    if (!cplBC.useSv1D && !cplBC.useSvZeroD) {
       cplBC.schm = CplBCType::cplBC_SI;
       if (lEq.useTLS) {
         cplBC.schm = CplBCType::cplBC_E;

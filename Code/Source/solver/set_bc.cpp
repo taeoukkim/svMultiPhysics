@@ -106,11 +106,12 @@ void calc_der_cpl_bc(ComMod& com_mod, const CmMod& cm_mod, const SolutionStates&
       }
     }
 
-    // Compute flowrates/pressures at 3D coupled boundaries for Coupled BCs
+    // Compute flowrates/pressures at 3D coupled boundaries for Coupled BCs.
+    // DIR coupling (both svZeroD and svOneD): the downstream solver is driven
+    // by the 3D face average pressure, so compute_pressures() is required.
+    // NEU coupling: the downstream solver is driven by the 3D outflow Q.
     if (utils::btest(bc.bType, iBC_Coupled)) {
-      if (cplBC.useSv1D &&
-          bc.coupled_bc.get_bc_type() == consts::BoundaryConditionType::bType_Dir) {
-        // For svOneD DIR coupling the 1D solver needs the 3D face pressure.
+      if (bc.coupled_bc.get_bc_type() == consts::BoundaryConditionType::bType_Dir) {
         bc.coupled_bc.compute_pressures(com_mod, cm_mod);
       } else {
         bc.coupled_bc.compute_flowrates(com_mod, cm_mod);
@@ -181,6 +182,10 @@ void calc_der_cpl_bc(ComMod& com_mod, const CmMod& cm_mod, const SolutionStates&
      set_bc::genBC_Integ_X(com_mod, cm_mod, "D");
    } else if (cplBC.useSvZeroD) {
      svZeroD::calc_svZeroD(com_mod, cm_mod, 'D');
+     // Also integrate any RCR faces that coexist with svZeroD faces.
+     if (RCRflag) {
+       set_bc::cplBC_Integ_X(com_mod, cm_mod, true);
+     }
    } else if (cplBC.useSv1D) {
      svOneD::calc_svOneD(com_mod, cm_mod, 'D');
      // Also integrate any RCR faces that coexist with svOneD faces.
@@ -235,6 +240,10 @@ void calc_der_cpl_bc(ComMod& com_mod, const CmMod& cm_mod, const SolutionStates&
           set_bc::genBC_Integ_X(com_mod, cm_mod, "D");
         } else if (cplBC.useSvZeroD) {
           svZeroD::calc_svZeroD(com_mod, cm_mod, 'D');
+          // Also integrate any RCR faces that coexist with svZeroD faces.
+          if (RCRflag) {
+            set_bc::cplBC_Integ_X(com_mod, cm_mod, true);
+          }
         } else if (cplBC.useSv1D) {
           svOneD::calc_svOneD(com_mod, cm_mod, 'D');
           // Also integrate any RCR faces that coexist with svOneD faces.
@@ -783,11 +792,12 @@ void set_bc_cpl(ComMod& com_mod, CmMod& cm_mod, const SolutionStates& solutions)
       }
 
 
-      // Compute flowrates/pressures at 3D coupled boundaries for Coupled BCs
+      // Compute flowrates/pressures at 3D coupled boundaries for Coupled BCs.
+      // DIR coupling (both svZeroD and svOneD): the downstream solver is driven
+      // by the 3D face average pressure, so compute_pressures() is required.
+      // NEU coupling: the downstream solver is driven by the 3D outflow Q.
       if (utils::btest(bc.bType, iBC_Coupled)) {
-        if (cplBC.useSv1D &&
-            bc.coupled_bc.get_bc_type() == consts::BoundaryConditionType::bType_Dir) {
-          // For svOneD DIR coupling the 1D solver needs the 3D face pressure.
+        if (bc.coupled_bc.get_bc_type() == consts::BoundaryConditionType::bType_Dir) {
           bc.coupled_bc.compute_pressures(com_mod, cm_mod);
         } else {
           bc.coupled_bc.compute_flowrates(com_mod, cm_mod);
@@ -838,6 +848,10 @@ void set_bc_cpl(ComMod& com_mod, CmMod& cm_mod, const SolutionStates& solutions)
        set_bc::genBC_Integ_X(com_mod, cm_mod, "D");
     } else if (cplBC.useSvZeroD){
       svZeroD::calc_svZeroD(com_mod, cm_mod, 'D');
+      // Also integrate any RCR faces that coexist with svZeroD faces.
+      if (RCRflag) {
+        set_bc::cplBC_Integ_X(com_mod, cm_mod, true);
+      }
     } else if (cplBC.useSv1D) {
       svOneD::calc_svOneD(com_mod, cm_mod, 'D');
       // Also integrate any RCR faces that coexist with svOneD faces.
@@ -939,7 +953,12 @@ void set_bc_dir(ComMod& com_mod, SolutionStates& solutions)
         }
       } // END bType_CMM
 
-      if (!utils::btest(bc.bType, iBC_Dir)) {
+      // Allow Coupled BCs whose internal coupling type is DIR (svZeroD/svOneD DIR
+      // coupling): iBC_Dir is cleared for these in read_files but the velocity
+      // profile must still be applied via set_bc_dir_l.
+      bool isCoupledDir = utils::btest(bc.bType, iBC_Coupled) &&
+                          (bc.coupled_bc.get_bc_type() == BoundaryConditionType::bType_Dir);
+      if (!utils::btest(bc.bType, iBC_Dir) && !isCoupledDir) {
         continue;
       }
 
@@ -1448,7 +1467,11 @@ void set_bc_neu(ComMod& com_mod, const CmMod& cm_mod, const SolutionStates& solu
 
     if (utils::btest(bc.bType, iBC_Ris0D))  {continue;}
 
-    if (utils::btest(bc.bType, iBC_Neu) || utils::btest(bc.bType, iBC_Coupled)) {
+    // Coupled BCs with DIR type must be handled by set_bc_dir (velocity profile),
+    // not here.  Only NEU Coupled BCs get a Neumann pressure traction.
+    bool isCoupledDir = utils::btest(bc.bType, iBC_Coupled) &&
+                        (bc.coupled_bc.get_bc_type() == BoundaryConditionType::bType_Dir);
+    if ((utils::btest(bc.bType, iBC_Neu) || utils::btest(bc.bType, iBC_Coupled)) && !isCoupledDir) {
       #ifdef debug_set_bc_neu
       dmsg << "iM: " << iM+1;
       dmsg << "iFa: " << iFa+1;
