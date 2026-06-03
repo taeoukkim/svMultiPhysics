@@ -26,6 +26,11 @@ CoupledBoundaryCondition::CoupledBoundaryCondition(const CoupledBoundaryConditio
     , oned_ramp_steps_(other.oned_ramp_steps_)
     , oned_ramp_ref_pressure_(other.oned_ramp_ref_pressure_)
     , oned_relax_factor_(other.oned_relax_factor_)
+    , ramp_step_count_(other.ramp_step_count_)
+    , P_prev_sent_old_(other.P_prev_sent_old_)
+    , P_prev_sent_new_(other.P_prev_sent_new_)
+    , Q_prev_sent_(other.Q_prev_sent_)
+    , P_neu_prev_(other.P_neu_prev_)
     , Qo_(other.Qo_)
     , Qn_(other.Qn_)
     , Po_(other.Po_)
@@ -61,6 +66,11 @@ CoupledBoundaryCondition& CoupledBoundaryCondition::operator=(const CoupledBound
         oned_ramp_steps_ = other.oned_ramp_steps_;
         oned_ramp_ref_pressure_ = other.oned_ramp_ref_pressure_;
         oned_relax_factor_ = other.oned_relax_factor_;
+        ramp_step_count_ = other.ramp_step_count_;
+        P_prev_sent_old_ = other.P_prev_sent_old_;
+        P_prev_sent_new_ = other.P_prev_sent_new_;
+        Q_prev_sent_ = other.Q_prev_sent_;
+        P_neu_prev_ = other.P_neu_prev_;
         Qo_ = other.Qo_;
         Qn_ = other.Qn_;
         Po_ = other.Po_;
@@ -95,6 +105,11 @@ CoupledBoundaryCondition::CoupledBoundaryCondition(CoupledBoundaryCondition&& ot
     , oned_ramp_steps_(other.oned_ramp_steps_)
     , oned_ramp_ref_pressure_(other.oned_ramp_ref_pressure_)
     , oned_relax_factor_(other.oned_relax_factor_)
+    , ramp_step_count_(other.ramp_step_count_)
+    , P_prev_sent_old_(other.P_prev_sent_old_)
+    , P_prev_sent_new_(other.P_prev_sent_new_)
+    , Q_prev_sent_(other.Q_prev_sent_)
+    , P_neu_prev_(other.P_neu_prev_)
     , Qo_(other.Qo_)
     , Qn_(other.Qn_)
     , Po_(other.Po_)
@@ -145,6 +160,11 @@ CoupledBoundaryCondition& CoupledBoundaryCondition::operator=(CoupledBoundaryCon
         oned_ramp_steps_ = other.oned_ramp_steps_;
         oned_ramp_ref_pressure_ = other.oned_ramp_ref_pressure_;
         oned_relax_factor_ = other.oned_relax_factor_;
+        ramp_step_count_ = other.ramp_step_count_;
+        P_prev_sent_old_ = other.P_prev_sent_old_;
+        P_prev_sent_new_ = other.P_prev_sent_new_;
+        Q_prev_sent_ = other.Q_prev_sent_;
+        P_neu_prev_ = other.P_neu_prev_;
         Qo_ = other.Qo_;
         Qn_ = other.Qn_;
         Po_ = other.Po_;
@@ -1344,4 +1364,24 @@ void CoupledBoundaryCondition::bcast_coupled_neumann_pressure(const CmMod& cm_mo
     }
     cm.bcast(cm_mod, &pr);
     set_pressure(pr);
+}
+
+void CoupledBoundaryCondition::bcast_coupled_dir_flowrate(const CmMod& cm_mod, cmType& cm)
+{
+    if (cm.seq()) {
+        return;
+    }
+    using namespace consts;
+    if (get_bc_type() != BoundaryConditionType::bType_Dir) {
+        return;
+    }
+    double Qo = 0.0;
+    double Qn = 0.0;
+    if (cm.mas(cm_mod)) {
+        Qo = get_Qo();
+        Qn = get_Qn();
+    }
+    cm.bcast(cm_mod, &Qo);
+    cm.bcast(cm_mod, &Qn);
+    set_flowrates(Qo, Qn);
 }
