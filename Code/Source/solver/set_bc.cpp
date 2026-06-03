@@ -180,20 +180,21 @@ void calc_der_cpl_bc(ComMod& com_mod, const CmMod& cm_mod, const SolutionStates&
   // Call genBC or cplBC to get updated pressures or flowrates.
   if (cplBC.useGenBC) {
      set_bc::genBC_Integ_X(com_mod, cm_mod, "D");
-   } else if (cplBC.useSvZeroD) {
-     svZeroD::calc_svZeroD(com_mod, cm_mod, 'D');
-     // Also integrate any RCR faces that coexist with svZeroD faces.
-     if (RCRflag) {
-       set_bc::cplBC_Integ_X(com_mod, cm_mod, true);
-     }
-   } else if (cplBC.useSv1D) {
-     svOneD::calc_svOneD(com_mod, cm_mod, 'D');
-     // Also integrate any RCR faces that coexist with svOneD faces.
-     if (RCRflag) {
-       set_bc::cplBC_Integ_X(com_mod, cm_mod, true);
-     }
    } else {
-     set_bc::cplBC_Integ_X(com_mod, cm_mod, RCRflag);
+    // In mixed-coupling simulations both useSvZeroD and useSv1D can be true.
+    // Call each active solver independently.
+    if (cplBC.useSvZeroD) {
+      svZeroD::calc_svZeroD(com_mod, cm_mod, 'D');
+    }
+    if (cplBC.useSv1D) {
+      svOneD::calc_svOneD(com_mod, cm_mod, 'D');
+    }
+    if (!cplBC.useSvZeroD && !cplBC.useSv1D) {
+      set_bc::cplBC_Integ_X(com_mod, cm_mod, RCRflag);
+    } else if (RCRflag) {
+      // Also integrate any RCR faces that coexist with svZeroD/svOneD faces.
+      set_bc::cplBC_Integ_X(com_mod, cm_mod, true);
+    }
   }
 
   // Compute the epsilon parameter (diff) for the finite difference calculation
@@ -291,7 +292,7 @@ void calc_der_cpl_bc(ComMod& com_mod, const CmMod& cm_mod, const SolutionStates&
       
       // Perturb flowrate and compute new pressure
       bc.coupled_bc.perturb_flowrate(diff);
-      if (cplBC.useSv1D) {
+      if (bc.coupled_bc.is_sv1d_face()) {
         svOneD::calc_svOneD(com_mod, cm_mod, 'D');
       } else {
         svZeroD::calc_svZeroD(com_mod, cm_mod, 'D');
@@ -846,20 +847,21 @@ void set_bc_cpl(ComMod& com_mod, CmMod& cm_mod, const SolutionStates& solutions)
     // Updates pressure or flowrates stored in cplBC.fa[i].y
     if (cplBC.useGenBC) {
        set_bc::genBC_Integ_X(com_mod, cm_mod, "D");
-    } else if (cplBC.useSvZeroD){
-      svZeroD::calc_svZeroD(com_mod, cm_mod, 'D');
-      // Also integrate any RCR faces that coexist with svZeroD faces.
-      if (RCRflag) {
-        set_bc::cplBC_Integ_X(com_mod, cm_mod, true);
-      }
-    } else if (cplBC.useSv1D) {
-      svOneD::calc_svOneD(com_mod, cm_mod, 'D');
-      // Also integrate any RCR faces that coexist with svOneD faces.
-      if (RCRflag) {
-        set_bc::cplBC_Integ_X(com_mod, cm_mod, true);
-      }
     } else {
-       set_bc::cplBC_Integ_X(com_mod, cm_mod, RCRflag);
+      // In mixed-coupling simulations both useSvZeroD and useSv1D can be true.
+      // Call each active solver independently.
+      if (cplBC.useSvZeroD) {
+        svZeroD::calc_svZeroD(com_mod, cm_mod, 'D');
+      }
+    if (cplBC.useSv1D) {
+        svOneD::calc_svOneD(com_mod, cm_mod, 'D');
+      }
+      if (!cplBC.useSvZeroD && !cplBC.useSv1D) {
+        set_bc::cplBC_Integ_X(com_mod, cm_mod, RCRflag);
+      } else if (RCRflag) {
+        // Also integrate any RCR faces that coexist with svZeroD/svOneD faces.
+        set_bc::cplBC_Integ_X(com_mod, cm_mod, true);
+      }
     }
   }
 
@@ -1540,7 +1542,38 @@ void set_bc_neu_l(ComMod& com_mod, const CmMod& cm_mod, const bcType& lBc, const
          }
        }
 
-     } else if (utils::btest(lBc.bType,iBC_res)) {
+     } else if (utils::btest(lBc.bType,iBC_Coupled)) {
+       // New-style Coupled NEU BC (svOneD/svZeroD): apply the actual 1D/0D
+       // pressure from the most recent 'D' solver call.  bc.g is updated
+       // every Newton iteration by set_bc_cpl / calc_der_cpl_bc.
+       
+       //h(0) = lBc.g;
+
+       double Q_3D = all_fun::integ(com_mod, cm_mod, lFa, Yn, eq.s, solutions,
+                                    eq.s+nsd-1, false,
+                                    consts::MechanicalConfigurationType::reference);
+
+         
+         h(0) = lBc.g;
+         //h(0) = lBc.g - lBc.r * std::abs(Q_3D);
+         
+         // Backflow kinetic energy correction: when backflow is detected
+         // (Q < 0), subtract the face-averaged dynamic pressure to further
+         // reduce the applied traction and damp the incoming flow.
+         if (Q_3D < 0.0) {
+           int iM = lFa.iM;
+           int cDmn_local = all_fun::domain(com_mod, com_mod.msh[iM], cEq, lFa.gE(0));
+           double rho  = eq.dmn[cDmn_local].prop.at(
+               consts::PhysicalProperyType::fluid_density);
+           double beta = eq.dmn[cDmn_local].prop.at(
+               consts::PhysicalProperyType::backflow_stab);
+           double A   = lFa.area;
+           if (A > 0.0) {
+             double u_n = Q_3D / A;  // face-averaged normal velocity (< 0)
+             h(0) -= 0.5 * beta * rho * u_n * u_n;
+           }
+         }     
+        } else if (utils::btest(lBc.bType,iBC_res)) {
        h(0) = lBc.r * all_fun::integ(com_mod, cm_mod, lFa, Yn, eq.s, solutions, eq.s+nsd-1, false, consts::MechanicalConfigurationType::reference);
 
      } else if (utils::btest(lBc.bType,iBC_std)) {
