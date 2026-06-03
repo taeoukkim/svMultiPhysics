@@ -110,12 +110,19 @@ struct OneDModelState {
   double ramp_ref_pressure = 0.0;
   int    step_count = 0;  ///< Number of committed (BCFlag=='L') steps taken.
 
-  // Under-relaxation for DIR coupling pressure (omega in (0, 1]).
-  // Applied after ramping: P_sent = omega * P_target + (1-omega) * P_prev_sent.
-  // Default 1.0 = no relaxation.
+  // Under-relaxation (omega in (0, 1]).  Default 1.0 = no relaxation.
+  //
+  // DIR coupling:
+  //   Input  (P sent to 1D): P_sent  = omega * P_target + (1-omega) * P_prev_sent
+  //   Output (Q from 1D)   : Q_relax = omega * Q_raw    + (1-omega) * Q_prev_sent
+  //
+  // NEU coupling:
+  //   Output (P from 1D)   : P_relax = omega * P_raw    + (1-omega) * P_neu_prev
   double relax_factor = 1.0;
-  double P_prev_sent_old = 0.0;  ///< Under-relaxed pressure sent at params[3] (t_old) on last 'L' step.
-  double P_prev_sent_new = 0.0;  ///< Under-relaxed pressure sent at params[4] (t_new) on last 'L' step.
+  double P_prev_sent_old = 0.0;  ///< Under-relaxed pressure sent at params[3] (t_old) on last 'L' step (DIR).
+  double P_prev_sent_new = 0.0;  ///< Under-relaxed pressure sent at params[4] (t_new) on last 'L' step (DIR).
+  double Q_prev_sent = 0.0;      ///< Under-relaxed flow rate output on last 'L' step (DIR only).
+  double P_neu_prev  = 0.0;      ///< Under-relaxed pressure output on last 'L' step (NEU only).
 };
 
 // ---------------------------------------------------------------------------
@@ -365,11 +372,24 @@ void calc_svOneD(ComMod& com_mod, const CmMod& cm_mod, char BCFlag)
       // for an inlet face (outward normal points away from the domain).
       // This matches the svZeroD convention: in_out = -1 for DIR (outlet of 0D
       // = inlet of 3D), giving QCoupled = -1 * lpn_state_y[flow_id].
+      double Q_raw = -cpl_values[k];
+      // Apply under-relaxation to the Q output to damp timestep-to-timestep oscillations.
+      const double omega = st.relax_factor;
+      double Qn_relaxed = omega * Q_raw + (1.0 - omega) * st.Q_prev_sent;
       double Qo_prev = cpl_bc.get_Qn();
-      cpl_bc.set_flowrates(Qo_prev, -cpl_values[k]);
+      cpl_bc.set_flowrates(Qo_prev, Qn_relaxed);
+      if (BCFlag == 'L') {
+        st.Q_prev_sent = Qn_relaxed;
+      }
     } else {
       // 1D solver returns pressure P for NEU coupling.
-      cpl_bc.set_pressure(cpl_values[k]);
+      // Apply under-relaxation to damp timestep-to-timestep oscillations.
+      const double omega = st.relax_factor;
+      double P_relaxed = omega * cpl_values[k] + (1.0 - omega) * st.P_neu_prev;
+      cpl_bc.set_pressure(P_relaxed);
+      if (BCFlag == 'L') {
+        st.P_neu_prev = P_relaxed;
+      }
     }
   }
 
