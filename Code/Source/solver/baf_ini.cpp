@@ -13,7 +13,7 @@
 #include "utils.h"
 #include "svZeroD_interface.h"
 #include "svZeroD_subroutines.h"
-#include "sv1D_subroutines.h"
+#include "svOneD_subroutines.h"
 
 #include "fsils_api.hpp"
 #include "fils_struct.hpp"
@@ -124,7 +124,7 @@ void baf_ini(Simulation* simulation, SolutionStates& solutions)
         com_mod.cplBC.fa[i].name = com_mod.msh[iM].fa[iFa].name;
         com_mod.cplBC.fa[i].y = 0.0;
 
-        // Copy per-face 1D input file if present (sv1D coupling).
+        // Copy per-face 1D input file if present (svOneD coupling).
         if (!bc.oned_input_file.empty()) {
           com_mod.cplBC.fa[i].oned_input_file = bc.oned_input_file;
         }
@@ -146,6 +146,9 @@ void baf_ini(Simulation* simulation, SolutionStates& solutions)
           com_mod.cplBC.fa[i].RCR.Rd = bc.RCR.Rd;
           com_mod.cplBC.fa[i].RCR.Pd = bc.RCR.Pd;
           com_mod.cplBC.fa[i].RCR.Xo = bc.RCR.Xo;
+          if (utils::btest(bc.bType, iBC_RCR)) {
+            com_mod.cplBC.fa[i].isRCR = true;
+          }
         } else { 
           throw std::runtime_error("Not a compatible cplBC_type");
         }
@@ -170,7 +173,7 @@ void baf_ini(Simulation* simulation, SolutionStates& solutions)
     }
 
     if (com_mod.cplBC.useSv1D) {
-      sv1D::init_sv1D(com_mod, cm_mod);
+      svOneD::init_svOneD(com_mod, cm_mod);
     }
 
     // Initialize cap integration for Coupled boundary conditions

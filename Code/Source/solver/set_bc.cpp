@@ -19,7 +19,7 @@
 #include <math.h>
 #include "svZeroD_interface.h"
 #include "svZeroD_subroutines.h"
-#include "sv1D_subroutines.h"
+#include "svOneD_subroutines.h"
 
 namespace set_bc {
 
@@ -106,10 +106,16 @@ void calc_der_cpl_bc(ComMod& com_mod, const CmMod& cm_mod, const SolutionStates&
       }
     }
 
-    // Compute flowrates at 3D Neumann0D boundaries at timesteps n and n+1 for Coupled BCs
+    // Compute flowrates/pressures at 3D coupled boundaries for Coupled BCs
     if (utils::btest(bc.bType, iBC_Coupled)) {
-      bc.coupled_bc.compute_flowrates(com_mod, cm_mod, solutions);
-      #ifdef debug_calc_der_cpl_bc 
+      if (cplBC.useSv1D &&
+          bc.coupled_bc.get_bc_type() == consts::BoundaryConditionType::bType_Dir) {
+        // For svOneD DIR coupling the 1D solver needs the 3D face pressure.
+        bc.coupled_bc.compute_pressures(com_mod, cm_mod);
+      } else {
+        bc.coupled_bc.compute_flowrates(com_mod, cm_mod);
+      }
+      #ifdef debug_calc_der_cpl_bc
       dmsg << "iBC_Coupled ";
       dmsg << "coupled_bc.Qo: " << bc.coupled_bc.get_Qo();
       dmsg << "coupled_bc.Qn: " << bc.coupled_bc.get_Qn();
@@ -176,7 +182,11 @@ void calc_der_cpl_bc(ComMod& com_mod, const CmMod& cm_mod, const SolutionStates&
    } else if (cplBC.useSvZeroD) {
      svZeroD::calc_svZeroD(com_mod, cm_mod, 'D');
    } else if (cplBC.useSv1D) {
-     sv1D::calc_sv1D(com_mod, cm_mod, 'D');
+     svOneD::calc_svOneD(com_mod, cm_mod, 'D');
+     // Also integrate any RCR faces that coexist with svOneD faces.
+     if (RCRflag) {
+       set_bc::cplBC_Integ_X(com_mod, cm_mod, true);
+     }
    } else {
      set_bc::cplBC_Integ_X(com_mod, cm_mod, RCRflag);
   }
@@ -226,7 +236,11 @@ void calc_der_cpl_bc(ComMod& com_mod, const CmMod& cm_mod, const SolutionStates&
         } else if (cplBC.useSvZeroD) {
           svZeroD::calc_svZeroD(com_mod, cm_mod, 'D');
         } else if (cplBC.useSv1D) {
-          sv1D::calc_sv1D(com_mod, cm_mod, 'D');
+          svOneD::calc_svOneD(com_mod, cm_mod, 'D');
+          // Also integrate any RCR faces that coexist with svOneD faces.
+          if (RCRflag) {
+            set_bc::cplBC_Integ_X(com_mod, cm_mod, true);
+          }
         } else {
           set_bc::cplBC_Integ_X(com_mod, cm_mod, RCRflag);
         }
@@ -268,7 +282,11 @@ void calc_der_cpl_bc(ComMod& com_mod, const CmMod& cm_mod, const SolutionStates&
       
       // Perturb flowrate and compute new pressure
       bc.coupled_bc.perturb_flowrate(diff);
-      svZeroD::calc_svZeroD(com_mod, cm_mod, 'D');
+      if (cplBC.useSv1D) {
+        svOneD::calc_svOneD(com_mod, cm_mod, 'D');
+      } else {
+        svZeroD::calc_svZeroD(com_mod, cm_mod, 'D');
+      }
       
       // Finite difference: dP/dQ
       bc.r = (bc.coupled_bc.get_pressure() - orig_state.pressure) / diff;
@@ -482,26 +500,40 @@ void RCR_Integ_X(ComMod& com_mod, const CmMod& cm_mod, int istat)
 
   double tt = fmax(time - dt, 0.0);
   double dtt = dt / static_cast<double>(nTS);
-  int nX = cplBC.nFa;
+
+  // Collect indices of RCR faces only.  When svOneD and RCR are mixed, some
+  // cplBC.fa[] entries belong to the 1D solver and must be skipped here to
+  // avoid accessing uninitialised RCR parameters (Rp/C/Rd/Pd = 0) and
+  // causing division-by-zero inside the RK4 loop.
+  std::vector<int> rcrIdx;
+  rcrIdx.reserve(cplBC.nFa);
+  for (int i = 0; i < cplBC.nFa; i++) {
+    if (cplBC.fa[i].isRCR) {
+      rcrIdx.push_back(i);
+    }
+  }
+  int nX = static_cast<int>(rcrIdx.size());
 
   Vector<double> Rp(nX), C(nX), Rd(nX), Pd(nX); 
   Vector<double> X(nX), Xrk(nX); 
   Array<double> frk(nX,4), Qrk(nX,4);
 
-  for (int i = 0; i < nX; i++) {
-    Rp(i) = cplBC.fa[i].RCR.Rp;
-    C(i) = cplBC.fa[i].RCR.C;
-    Rd(i) = cplBC.fa[i].RCR.Rd;
-    Pd(i) = cplBC.fa[i].RCR.Pd;
+  for (int k = 0; k < nX; k++) {
+    int i = rcrIdx[k];
+    Rp(k) = cplBC.fa[i].RCR.Rp;
+    C(k)  = cplBC.fa[i].RCR.C;
+    Rd(k) = cplBC.fa[i].RCR.Rd;
+    Pd(k) = cplBC.fa[i].RCR.Pd;
+    X(k)  = cplBC.xo[i];
   }
-  X = cplBC.xo;
 
   for (int n = 0; n < nTS; n++) {
     for (int i = 0; i < 4; i++) {
       double r = static_cast<double>(i) / 3.0;
       r = (static_cast<double>(n) + r) / static_cast<double>(nTS);
-      for (int j = 0; j < Qrk.nrows(); j++) {
-        Qrk(j,i) = cplBC.fa[j].Qo + (cplBC.fa[j].Qn - cplBC.fa[j].Qo) * r;
+      for (int j = 0; j < nX; j++) {
+        int fi = rcrIdx[j];
+        Qrk(j,i) = cplBC.fa[fi].Qo + (cplBC.fa[fi].Qn - cplBC.fa[fi].Qo) * r;
       }   
     }
 
@@ -518,21 +550,21 @@ void RCR_Integ_X(ComMod& com_mod, const CmMod& cm_mod, int istat)
     trk = tt + dtt / 3.0;
     Xrk = X  + dtt * frk.col(0) / 3.0;
 
-    for (int j = 0; j < Qrk.nrows(); j++) {
+    for (int j = 0; j < nX; j++) {
       frk(j,1) = (Qrk(j,1) - (Xrk(j)-Pd(j)) / Rd(j)) / C(j);
     }
 
     // RK-4 3rd pass
     trk = tt + 2.0 * dtt / 3.0;
     Xrk = X - dtt * frk.col(0) / 3.0  +  dtt * frk.col(1);
-    for (int j = 0; j < Qrk.nrows(); j++) {
+    for (int j = 0; j < nX; j++) {
       frk(j,2) = (Qrk(j,2) - (Xrk(j) - Pd(j)) / Rd(j)) / C(j);
     }
 
     // RK-4 4th pass
     trk = tt + dtt;
     Xrk = X  + dtt * frk.col(0)  -  dtt * frk.col(1)  +  dtt * frk.col(2);
-    for (int j = 0; j < Qrk.nrows(); j++) {
+    for (int j = 0; j < nX; j++) {
       frk(j,3) = (Qrk(j,3) - (Xrk(j) - Pd(j)) / Rd(j)) / C(j);
     }
 
@@ -540,8 +572,8 @@ void RCR_Integ_X(ComMod& com_mod, const CmMod& cm_mod, int istat)
     X  = X + r*(frk.col(0) + 3.0*(frk.col(1) + frk.col(2)) + frk.col(3));
     tt = tt + dtt;
 
-    for (int i = 0; i < nX; i++) {
-      if (isnan(X(i))) {
+    for (int k = 0; k < nX; k++) {
+      if (isnan(X(k))) {
         throw std::runtime_error("ERROR: NaN detected in RCR integration");
         istat = -1;
         return;
@@ -549,13 +581,14 @@ void RCR_Integ_X(ComMod& com_mod, const CmMod& cm_mod, int istat)
     }
   }
 
-  cplBC.xn = X;
-  cplBC.xp(0) = tt;
-
-  for (int i = 0; i < nX; i++) {
-    cplBC.xp(i+1) = Qrk(i,3); //cplBC.fa(i).Qn
-    cplBC.fa[i].y = X(i) + (cplBC.fa[i].Qn * Rp(i));
+  // Write results back using the original (sparse) face indices.
+  for (int k = 0; k < nX; k++) {
+    int i = rcrIdx[k];
+    cplBC.xn[i] = X(k);
+    cplBC.xp(i+1) = Qrk(k,3);
+    cplBC.fa[i].y = X(k) + (cplBC.fa[i].Qn * Rp(k));
   }
+  cplBC.xp(0) = tt;
 
 }
 
@@ -750,9 +783,15 @@ void set_bc_cpl(ComMod& com_mod, CmMod& cm_mod, const SolutionStates& solutions)
       }
 
 
-      // Compute flowrates at 3D Neumann0D boundaries at timesteps n and n+1 for Coupled BCs
+      // Compute flowrates/pressures at 3D coupled boundaries for Coupled BCs
       if (utils::btest(bc.bType, iBC_Coupled)) {
-        bc.coupled_bc.compute_flowrates(com_mod, cm_mod, solutions);
+        if (cplBC.useSv1D &&
+            bc.coupled_bc.get_bc_type() == consts::BoundaryConditionType::bType_Dir) {
+          // For svOneD DIR coupling the 1D solver needs the 3D face pressure.
+          bc.coupled_bc.compute_pressures(com_mod, cm_mod);
+        } else {
+          bc.coupled_bc.compute_flowrates(com_mod, cm_mod);
+        }
       }
       
       if (ptr != -1) {
@@ -800,7 +839,11 @@ void set_bc_cpl(ComMod& com_mod, CmMod& cm_mod, const SolutionStates& solutions)
     } else if (cplBC.useSvZeroD){
       svZeroD::calc_svZeroD(com_mod, cm_mod, 'D');
     } else if (cplBC.useSv1D) {
-      sv1D::calc_sv1D(com_mod, cm_mod, 'D');
+      svOneD::calc_svOneD(com_mod, cm_mod, 'D');
+      // Also integrate any RCR faces that coexist with svOneD faces.
+      if (RCRflag) {
+        set_bc::cplBC_Integ_X(com_mod, cm_mod, true);
+      }
     } else {
        set_bc::cplBC_Integ_X(com_mod, cm_mod, RCRflag);
     }
