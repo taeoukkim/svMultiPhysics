@@ -234,16 +234,15 @@ private:
     std::unordered_map<int, int> cap_g_to_cap_col_;
     /// @brief Cap geometry on ranks with \ref owns_cap_; empty on non-owning MPI ranks.
     std::optional<CappingSurface> cap_;
-    /// @brief Cap-only mesh state for integration (columns 0..n_cap-1); refreshed by \ref gather_global_mesh_state.
+    /// @brief Reused global-column mesh state for cap gather (allocated on ranks that unpack; includes Yo/Yn rows).
     mutable CapGlobalMeshState cap_global_mesh_state_;
 
     /// @brief Simulation \c CmMod copy; set in \c distribute() for cap MPI (e.g. \c copy_cap_surface_to_linear_solver_face).
     CmMod cm_mod_{};
-
     /// Build \ref cap_g_to_cap_col_ from \ref cap_mesh_global_node_ids_.
     void rebuild_cap_global_to_col_map();
 
-    /// Fill \ref cap_global_mesh_state_ with cap nodes only (uses \ref cap_mesh_global_node_ids_).
+    /// Fill \ref cap_global_mesh_state_. Serial: all ranks. Parallel: root only (slaves skip buffer allocation).
     void gather_global_mesh_state(ComMod& com_mod, const CmMod& cm_mod, const SolutionStates& solutions, bool gather_Y) const;
 
 
