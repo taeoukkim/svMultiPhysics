@@ -125,12 +125,20 @@ struct OneDModelState {
   //   Output (P from 1D)   : P_applied = omega * P_target + (1-omega) * P_neu_prev
   //   (P_target already includes the ramp from ramp_ref_pressure to P_raw)
   double relax_factor = 1.0;
-  double P_prev_sent_old = 0.0;  ///< Under-relaxed pressure sent at params[3] (t_old) on last 'L' step (DIR).
-  double P_prev_sent_new = 0.0;  ///< Under-relaxed pressure sent at params[4] (t_new) on last 'L' step (DIR).
-  double Q_prev_sent = 0.0;      ///< Under-relaxed flow rate output on last 'L' step (DIR only).
-  double P_neu_prev  = 0.0;      ///< Under-relaxed pressure applied to 3D on last 'L' step (NEU only).
-  double Q_prev_sent_old = 0.0;  ///< Under-relaxed Q sent at params[3] (t_old) on last 'L' step (NEU).
-  double Q_prev_sent_new = 0.0;  ///< Under-relaxed Q sent at params[4] (t_new) on last 'L' step (NEU).
+
+  // Committed values from the last 'L' (accepted) step.
+  // Used only to initialise the iteration-tracking variables at the start of
+  // each new time step.
+  double P_prev_sent_new = 0.0;  ///< Committed P sent at params[4] on last 'L' step (DIR input).
+  double Q_prev_sent     = 0.0;  ///< Committed Q output on last 'L' step (DIR output).
+  double P_neu_prev      = 0.0;  ///< Committed P applied to 3D on last 'L' step (NEU output).
+  // Iteration-level tracking variables.
+  // Updated on every 'D' (and 'L') call; reset to the corresponding
+  // committed value above at the start of each new time step.
+  bool   after_L      = true;   ///< True immediately after an 'L' call; cleared on the first 'D' of the new step.
+  double P_iter_sent  = 0.0;    ///< P sent to 1D in the last iteration (DIR input relaxation reference).
+  double Q_iter_dir   = 0.0;    ///< Q output in the last iteration (DIR output relaxation reference).
+  double P_iter_neu   = 0.0;    ///< P applied to 3D in the last iteration (NEU output relaxation reference).
 };
 
 // ---------------------------------------------------------------------------
@@ -327,13 +335,14 @@ void calc_svOneD(ComMod& com_mod, const CmMod& cm_mod, char BCFlag)
     params[2] = t_new;
 
     if (bc.coupled_bc.get_bc_type() == BoundaryConditionType::bType_Neu) {
-      // NEU coupling: apply under-relaxation to the 3D flow rate Q sent to
-      // the 1D solver to damp timestep-to-timestep oscillations in the input.
-      // No ramping is applied here; ramping is applied to the *output* pressure
-      // P that the 1D solver returns (Phase 2 below).
-      const double omega = st.relax_factor;
-      params[3] = omega * bc.coupled_bc.get_Qo() + (1.0 - omega) * st.Q_prev_sent_new;
-      params[4] = omega * bc.coupled_bc.get_Qn() + (1.0 - omega) * st.Q_prev_sent_new;
+      // NEU coupling: send the actual 3D flow rate Q to the 1D solver.
+      // No input relaxation is applied here; relaxing the Q input would
+      // introduce a lag in the 1D solver's response and cause the same
+      // phase-shift artefact as time-step-level output relaxation.
+      // Coupling stability is achieved solely by relaxing the OUTPUT
+      // pressure P that the 1D solver returns (Phase 2 below).
+      params[3] = bc.coupled_bc.get_Qo();
+      params[4] = bc.coupled_bc.get_Qn();
     } else {
       double raw_P_old = bc.coupled_bc.get_Po();
       double raw_P_new = bc.coupled_bc.get_Pn();
@@ -351,11 +360,22 @@ void calc_svOneD(ComMod& com_mod, const CmMod& cm_mod, char BCFlag)
         P_target_new = raw_P_new;
       }
 
-      // Step 2: apply under-relaxation (damps timestep-to-timestep oscillations).
-      // P_sent = omega * P_target + (1 - omega) * P_prev_sent
+      // Step 2: iteration-level under-relaxation on the P input sent to the
+      // 1D solver.  On the first 'D' call of a new time step (after_L==true)
+      // the reference is reset to the committed value from the previous step.
+      // On subsequent 'D' calls within the same step, the reference is the
+      // value sent in the previous iteration.  This ensures that the
+      // relaxation acts as a within-step stabiliser rather than a cross-step
+      // IIR filter.
+      if (BCFlag == 'D' && st.after_L) {
+        st.P_iter_sent = st.P_prev_sent_new;
+        // after_L is cleared in Phase 2 so all ranks stay in sync.
+      }
       const double omega = st.relax_factor;
-      params[3] = omega * P_target_old + (1.0 - omega) * st.P_prev_sent_new;
-      params[4] = omega * P_target_new + (1.0 - omega) * st.P_prev_sent_new;
+      params[3] = omega * P_target_old + (1.0 - omega) * st.P_iter_sent;
+      params[4] = omega * P_target_new + (1.0 - omega) * st.P_iter_sent;
+      // Update the iteration reference for the next call within this step.
+      st.P_iter_sent = params[4];
     }
 
     // Working copy of solution so that 'D' steps don't corrupt the
@@ -382,14 +402,10 @@ void calc_svOneD(ComMod& com_mod, const CmMod& cm_mod, char BCFlag)
     // Commit the updated solution only on the final iteration.
     if (BCFlag == 'L') {
       st.solution = work_sol;
-      // Update the under-relaxation history with the values actually sent.
-      // NEU: Q_prev_sent updated here; P history updated in Phase 2.
-      // DIR: P_prev_sent tracks the pressure value sent to the 1D solver.
-      if (st.coupling_type == "NEU") {
-        st.Q_prev_sent_old = params[3];
-        st.Q_prev_sent_new = params[4];
-      } else {
-        st.P_prev_sent_old = params[3];
+      // Commit the P value actually sent to the 1D solver (DIR only).
+      // This becomes the initial reference for the next time step's first
+      // iteration.  NEU has no input relaxation, so nothing to commit there.
+      if (st.coupling_type == "DIR") {
         st.P_prev_sent_new = params[4];
       }
     }
@@ -403,6 +419,17 @@ void calc_svOneD(ComMod& com_mod, const CmMod& cm_mod, char BCFlag)
     auto& st = oned_models[k];
     MPI_Bcast(&cpl_values[k], 1, MPI_DOUBLE, st.owner_rank, cm.com());
     auto& cpl_bc = eq.bc[st.iBc].coupled_bc;
+
+    // On the first 'D' call of a new time step, reset the iteration-level
+    // relaxation references to the committed values from the previous step.
+    // This is done here (Phase 2) so that ALL ranks stay in sync; the owner
+    // rank already initialised P_iter_sent in Phase 1.
+    if (BCFlag == 'D' && st.after_L) {
+      st.Q_iter_dir = st.Q_prev_sent;
+      st.P_iter_neu = st.P_neu_prev;
+      st.after_L = false;
+    }
+
     if (cpl_bc.get_bc_type() == BoundaryConditionType::bType_Dir) {
       // 1D solver returns flow Q for DIR coupling; store it as flowrate so that
       // set_bc can read get_Qn() and build the nodal velocity profile.
@@ -412,17 +439,24 @@ void calc_svOneD(ComMod& com_mod, const CmMod& cm_mod, char BCFlag)
       // This matches the svZeroD convention: in_out = -1 for DIR (outlet of 0D
       // = inlet of 3D), giving QCoupled = -1 * lpn_state_y[flow_id].
       double Q_raw = -cpl_values[k];
-      // Apply under-relaxation to the Q output to damp timestep-to-timestep oscillations.
+      // Apply iteration-level under-relaxation to the Q output.
+      // The reference Q_iter_dir is the relaxed Q from the previous iteration
+      // within the same time step (reset to Q_prev_sent at the start of each
+      // new step).  At the fixed point Q_iter_dir == Q_raw, so the committed
+      // value equals the true 1D solver output.      
+
       const double omega = st.relax_factor;
-      double Qn_relaxed = omega * Q_raw + (1.0 - omega) * st.Q_prev_sent;
+      double Qn_relaxed = omega * Q_raw + (1.0 - omega) * st.Q_iter_dir;
+      st.Q_iter_dir = Qn_relaxed;  // update reference for next iteration
       double Qo_prev = cpl_bc.get_Qn();
       cpl_bc.set_flowrates(Qo_prev, Qn_relaxed);
       if (BCFlag == 'L') {
         st.Q_prev_sent = Qn_relaxed;
+        st.after_L = true;
       }
     } else {
       // 1D solver returns pressure P for NEU coupling.
-            //
+      //
       // Step 1: apply pressure ramp (scales output P from ramp_ref_pressure
       //         to the actual 1D pressure over the first ramp_steps committed
       //         steps).  This prevents a large sudden pressure jump from being
@@ -437,13 +471,20 @@ void calc_svOneD(ComMod& com_mod, const CmMod& cm_mod, char BCFlag)
       } else {
         P_target = P_raw;
       }
-      // Step 2: apply under-relaxation to damp timestep-to-timestep oscillations.
-      // P_applied = omega * P_target + (1 - omega) * P_prev_applied
+      // Step 2: apply iteration-level under-relaxation to the output pressure.
+      // The reference P_iter_neu is the relaxed P from the previous iteration
+      // within the same time step (reset to P_neu_prev at the start of each
+      // new step).  At the fixed point P_iter_neu == P_raw, so the committed
+      // value equals the true 1D solver output.  This avoids the cross-step
+      // IIR-filter effect that would occur if P_neu_prev (the previous
+      // time-step committed value) were used as the reference on every call.
       const double omega = st.relax_factor;
-      double P_relaxed = omega * P_target + (1.0 - omega) * st.P_neu_prev;
+      double P_relaxed = omega * P_target + (1.0 - omega) * st.P_iter_neu;
+      st.P_iter_neu = P_relaxed;  // update reference for next iteration
       cpl_bc.set_pressure(P_relaxed);
       if (BCFlag == 'L') {
         st.P_neu_prev = P_relaxed;
+        st.after_L = true;
       }
     }
   }
